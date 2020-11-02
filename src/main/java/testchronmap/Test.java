@@ -4,14 +4,10 @@ package testchronmap;
 import net.openhft.chronicle.map.ChronicleMap;
 import net.openhft.chronicle.map.ChronicleMapBuilder;
 import picocli.CommandLine;
-import shaded.org.apache.http.conn.routing.RouteInfo;
 import testchronmap.util.StatsTracker;
 
-import java.io.File;
-import java.io.IOException;
 import java.nio.file.Path;
 import java.util.Random;
-import java.util.stream.IntStream;
 
 public class Test {
 
@@ -29,8 +25,12 @@ public class Test {
         boolean randomKeys;
 
         @CommandLine.Option(names = {"-n", "--no-records"}, arity = "1",
-                defaultValue = "100000", description = "Number of values in record")
+                defaultValue = "1000000", description = "Number of values in record")
         int no_records;
+
+        @CommandLine.Option(names = {"--map-entry-count-factor"}, arity = "1",
+                defaultValue = "1.0", description = "Multiply against no. of entries to tweak size")
+        double map_entry_count_factor;
 
         @CommandLine.Option(names = {"-v", "--no-value"}, arity = "1",
                 defaultValue = "10", description = "Number of values in record")
@@ -52,32 +52,40 @@ public class Test {
                 defaultValue = "1000", description = "Interval in ms between stat update")
         long stats_interval_ms;
 
+        @CommandLine.Option(names = {"--do-not-store"},
+                defaultValue = "false", description = "Do not store in map - used to perf testing")
+        boolean do_not_store;
+
         @CommandLine.Option(names = {"-h", "--help"}, usageHelp = true, description = "display this help message")
         boolean usageHelpRequested;
 
     }
 
     public static ChronicleMap<CharSequence, CharSequence> createMap(Cli cli) {
+        long start = System.currentTimeMillis();
         try {
 
-        var buf = new StringBuilder();
-        for (int i = 0; i < cli.no_values * 2.5; i++) {
-            buf.append('9');
-        }
+            var buf = new StringBuilder();
+            for (int i = 0; i < cli.no_values * 2.5; i++) {
+                buf.append('5');
+            }
 
-        var builder = ChronicleMapBuilder
-                .simpleMapOf(CharSequence.class, CharSequence.class)
-                .entries(cli.no_records)
-                .maxBloatFactor(cli.maxBloatFactor)
-                .averageValue(buf.toString());
-        if (cli.file != null && cli.recover)
-            return builder.createOrRecoverPersistedTo(cli.file.toFile());
-        else if (cli.file != null && !cli.recover)
-            return builder.createPersistedTo(cli.file.toFile());
-        else
-            return builder.create();
-        } catch(Exception e) {
+            var builder = ChronicleMapBuilder
+                    .simpleMapOf(CharSequence.class, CharSequence.class)
+                    .entries((long)((double)cli.no_records*cli.map_entry_count_factor))
+                    .maxBloatFactor(cli.maxBloatFactor)
+                    .averageValue(buf.toString());
+            if (cli.file != null && cli.recover)
+                return builder.createOrRecoverPersistedTo(cli.file.toFile());
+            else if (cli.file != null && !cli.recover)
+                return builder.createPersistedTo(cli.file.toFile());
+            else
+                return builder.create();
+        } catch (Exception e) {
             throw new RuntimeException("Unable to create chron map: " + e, e);
+        } finally {
+            System.out.println("map setup time: " + (System.currentTimeMillis()-start));
+
         }
 
     }
@@ -112,11 +120,12 @@ public class Test {
         var key = keyProducer.next();
         try {
             tracker.addCallAbsolute("heap", new StatsTracker.Absolute() {
-                @Override public String getAbsolute() {
-                    return String.format("%.2f MB", chronMap.offHeapMemoryUsed()/(1024.0D*1024.0D));
+                @Override
+                public String getAbsolute() {
+                    return String.format("%.2f MB", chronMap.offHeapMemoryUsed() / (1024.0D * 1024.0D));
                 }
             });
-            System.out.printf("off heap: %d MB\n", chronMap.offHeapMemoryUsed()/(1024L*1024));
+            System.out.printf("off heap: %d MB\n", chronMap.offHeapMemoryUsed() / (1024L * 1024));
 
             tracker.start();
             var rand = new Random(5);
@@ -131,17 +140,20 @@ public class Test {
                 for (int i = 0; i < values.length; i++) {
                     values[i] = rand.nextInt(100);
                 }
+                field_count.addAndGet(key.length + values.length);
+
                 buf.setLength(0);
-                var valueString = NsvString.joinTo(buf, values).toString();
-                var currval = chronMap.get(keyString);
-                if (currval == null) {
-                    chronMap.put(keyString, valueString);
-                    field_count.addAndGet(key.length + values.length);
-                } else {
-                    if (!currval.toString().equals(valueString)) {
-                        val_dif.incrementAndGet();
+                if (!cli.do_not_store) {
+                    var valueString = NsvString.joinTo(buf, values).toString();
+                    var currval = chronMap.get(keyString);
+                    if (currval == null) {
+                        chronMap.put(keyString, valueString);
+                    } else {
+                        if (!currval.toString().equals(valueString)) {
+                            val_dif.incrementAndGet();
+                        }
+                        key_dup.incrementAndGet();
                     }
-                    key_dup.incrementAndGet();
                 }
 
                 key = keyProducer.next();
